@@ -1,0 +1,25 @@
+# Apple Silicon (M1/M2/M3/M4)
+
+paddlepaddle>=3.0.0
+paddleocr>=3.0.0
+
+pandas>=2.2.0
+numpy>=1.26.0
+
+opencv-python
+pillow
+
+pdf2image
+
+openpyxl
+
+lxml
+beautifulsoup4
+
+tqdm
+
+PyMuPDF
+
+# Streamlit UI (app.py)
+streamlit>=1.36
+tabulate      # pandas .to_markdown()

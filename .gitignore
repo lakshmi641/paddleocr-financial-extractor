@@ -1,0 +1,19 @@
+# virtualenvs
+venv/
+venv2/
+.venv/
+
+# python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / tooling
+.DS_Store
+.playwright-mcp/
+
+# ---- sensitive / large data (do NOT commit) ----
+# Real financial documents and extracted output stay local.
+input/
+output/
+*.pdf
