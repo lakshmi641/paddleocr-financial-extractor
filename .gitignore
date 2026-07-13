@@ -16,4 +16,4 @@ __pycache__/
 # Real financial documents and extracted output stay local.
 
 output/
-*.pdf
+
