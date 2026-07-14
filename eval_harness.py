@@ -63,39 +63,43 @@ def load_ground_truth(path):
     return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
-def resolve_pages(name, entry, default_tier):
+def resolve_pages(name, entry, default_tier, default_engine):
     """Prefer OCR-ing the PDF fresh (cache-aware); fall back to an
     already-extracted cache_dir so the harness can self-test against
     documents whose original PDF isn't on hand."""
     tier = entry.get("tier", default_tier)
+    engine = entry.get("engine", default_engine)
     pdf_path = entry.get("pdf")
     if pdf_path and os.path.exists(pdf_path):
-        extraction = ocr_engine.extract(pdf_path, tier=tier)
-        return extraction.pages, tier, pdf_path
+        extraction = ocr_engine.extract(pdf_path, tier=tier, engine=engine)
+        return extraction.pages, tier, engine, pdf_path
 
     cache_dir = entry.get("cache_dir")
     if cache_dir and ocr_engine.has_cache(cache_dir):
         pages = ocr_engine.load_pages_from_dir(cache_dir)
-        return pages, tier, cache_dir
+        return pages, tier, engine, cache_dir
 
-    return None, tier, None
+    return None, tier, engine, None
 
 
-def evaluate_entry(name, entry, default_tier):
-    pages, tier, source = resolve_pages(name, entry, default_tier)
+def evaluate_entry(name, entry, default_tier, default_engine):
+    pages, tier, engine, source = resolve_pages(name, entry, default_tier, default_engine)
     if pages is None:
         return {
-            "name": name, "source": None, "error": (
+            "name": name, "source": None, "engine": engine, "error": (
                 f"no readable 'pdf' ({entry.get('pdf')}) or cached "
                 f"'cache_dir' ({entry.get('cache_dir')})"
             ),
             "statements": {},
         }
 
-    extraction = ocr_engine.Extraction(pages=pages, tier=tier)
+    extraction = ocr_engine.Extraction(pages=pages, tier=tier, engine=engine)
     statements, _ = clf.classify(extraction)
 
-    result = {"name": name, "source": source, "error": None, "statements": {}}
+    result = {
+        "name": name, "source": source, "engine": engine, "error": None,
+        "statements": {},
+    }
     for key, fields in STATEMENT_FIELDS.items():
         gt = entry.get(key)
         if not gt:
@@ -128,19 +132,26 @@ def summarize(results):
     total_fields = matched_fields = 0
     total_statements = passed_recon = 0
     per_field_type = {}  # "balance_sheet.total_assets" -> [n, matched]
+    per_engine = {}  # "paddleocr" -> {"fields": [n, matched], "recon": [n, matched]}
 
     for r in results:
+        engine = r.get("engine") or "paddleocr"
+        eslot = per_engine.setdefault(engine, {"fields": [0, 0], "recon": [0, 0]})
         for key, s in r["statements"].items():
             total_statements += 1
+            eslot["recon"][0] += 1
             if s["recon_status"] == rec.OK:
                 passed_recon += 1
+                eslot["recon"][1] += 1
             for field, f in s["fields"].items():
                 total_fields += 1
                 slot = per_field_type.setdefault(f"{key}.{field}", [0, 0])
                 slot[0] += 1
+                eslot["fields"][0] += 1
                 if f["match"]:
                     matched_fields += 1
                     slot[1] += 1
+                    eslot["fields"][1] += 1
 
     return {
         "total_fields": total_fields,
@@ -150,6 +161,7 @@ def summarize(results):
         "passed_recon": passed_recon,
         "recon_rate": (passed_recon / total_statements) if total_statements else None,
         "per_field_type": per_field_type,
+        "per_engine": per_engine,
     }
 
 
@@ -177,6 +189,18 @@ def render_report(results, summary):
         )
     lines.append("")
 
+    if len(summary["per_engine"]) > 1:
+        lines.append("## Accuracy by engine\n")
+        lines.append("| Engine | Field accuracy | Reconciliation pass rate |")
+        lines.append("|---|---|---|")
+        for engine, e in sorted(summary["per_engine"].items()):
+            fn, fm = e["fields"]
+            rn, rm = e["recon"]
+            f_pct = f"{fm}/{fn} ({fm/fn*100:.0f}%)" if fn else "—"
+            r_pct = f"{rm}/{rn} ({rm/rn*100:.0f}%)" if rn else "—"
+            lines.append(f"| {engine} | {f_pct} | {r_pct} |")
+        lines.append("")
+
     if summary["per_field_type"]:
         lines.append("## Accuracy by field\n")
         lines.append("| Field | Matched | Total | Accuracy |")
@@ -191,7 +215,7 @@ def render_report(results, summary):
         if r["error"]:
             lines.append(f"- ⚠️ Skipped: {r['error']}\n")
             continue
-        lines.append(f"- Source: `{r['source']}`\n")
+        lines.append(f"- Source: `{r['source']}` (engine: `{r['engine']}`)\n")
         if not r["statements"]:
             lines.append("- No ground truth fields supplied for this document.\n")
             continue
@@ -221,6 +245,12 @@ def main():
     parser.add_argument("--ground-truth", default=DEFAULT_GROUND_TRUTH)
     parser.add_argument("--report", default=DEFAULT_REPORT)
     parser.add_argument("--tier", default="accurate", choices=["fast", "accurate"])
+    parser.add_argument(
+        "--engine", default="paddleocr", choices=["paddleocr", "paddleocr_vl"],
+        help="Default engine for entries that don't set their own 'engine' "
+             "field. Add two entries for the same PDF (one per engine, "
+             "different names) to A/B them in one report.",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.ground_truth):
@@ -235,7 +265,7 @@ def main():
     results = []
     for name, entry in entries.items():
         print(f"Evaluating {name}...")
-        results.append(evaluate_entry(name, entry, args.tier))
+        results.append(evaluate_entry(name, entry, args.tier, args.engine))
 
     summary = summarize(results)
     report = render_report(results, summary)

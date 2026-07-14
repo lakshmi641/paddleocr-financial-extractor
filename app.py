@@ -43,7 +43,20 @@ st.markdown(
 with st.sidebar:
     st.markdown("## Settings")
 
-    st.selectbox("OCR engine", ["PaddleOCR (PP-StructureV3)"], index=0)
+    engine_label = st.selectbox(
+        "OCR engine",
+        ["PaddleOCR (PP-StructureV3)", "PaddleOCR-VL"],
+        index=0,
+        help="PP-StructureV3 = classic two-stage pipeline (layout + OCR + a "
+             "separate table-structure model) -- fast/accurate tiers below. "
+             "PaddleOCR-VL = a vision-language model that reads each region "
+             "(including whole tables) directly instead of fitting a "
+             "geometric cell grid, which sidesteps the table-structure bugs "
+             "the classic pipeline hits on dense tables -- but is much "
+             "heavier per page, especially on CPU, and has no fast/accurate "
+             "split.",
+    )
+    engine = "paddleocr_vl" if engine_label == "PaddleOCR-VL" else "paddleocr"
 
     st.markdown("**Scope**")
     scope = st.radio(
@@ -57,18 +70,25 @@ with st.sidebar:
         end = c2.number_input("To", min_value=1, value=5, step=1)
         page_range = (int(start), int(end))
 
-    tier_label = st.radio(
-        "OCR tier",
-        ["Auto (recommended)", "Fast", "Accurate"],
-        index=0,
-        help="Auto = fast mobile models on every page, then automatically "
-             "re-OCRs just the pages that contain a table -- the pages a "
-             "reconciliation actually reads numbers from -- with the "
-             "sharper server models. Fast = mobile models everywhere "
-             "(quickest). Accurate = server models everywhere (slowest, "
-             "sharpest on every page).",
-    )
-    tier = {"Auto (recommended)": "auto", "Fast": "fast", "Accurate": "accurate"}[tier_label]
+    if engine == "paddleocr":
+        tier_label = st.radio(
+            "OCR tier",
+            ["Auto (recommended)", "Fast", "Accurate"],
+            index=0,
+            help="Auto = fast mobile models on every page, then automatically "
+                 "re-OCRs just the pages that contain a table -- the pages a "
+                 "reconciliation actually reads numbers from -- with the "
+                 "sharper server models. Fast = mobile models everywhere "
+                 "(quickest). Accurate = server models everywhere (slowest, "
+                 "sharpest on every page).",
+        )
+        tier = {"Auto (recommended)": "auto", "Fast": "fast", "Accurate": "accurate"}[tier_label]
+    else:
+        tier = "vl"
+        st.caption(
+            "PaddleOCR-VL uses one fixed VLM-based pipeline -- no fast/"
+            "accurate/auto split."
+        )
 
     st.markdown("---")
     device = os.environ.get("OCR_DEVICE", "cpu")
@@ -140,7 +160,7 @@ def run_extraction(pdf_path):
 
     extraction = ocr_engine.extract(
         pdf_path, tier=tier, device=device,
-        page_range=page_range, progress=cb,
+        page_range=page_range, progress=cb, engine=engine,
     )
     prog.progress(1.0, text="Done")
     prog.empty()
@@ -182,7 +202,14 @@ if "result" in st.session_state:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Document type", extraction.doc_type)
-    c2.metric("Engine", f"PaddleOCR · {extraction.tier}")
+    engine_display = {
+        "paddleocr": "PaddleOCR", "paddleocr_vl": "PaddleOCR-VL",
+    }.get(extraction.engine, extraction.engine)
+    c2.metric(
+        "Engine",
+        engine_display if extraction.engine == "paddleocr_vl"
+        else f"{engine_display} · {extraction.tier}",
+    )
     c3.metric("Core statements", clf.core_statement_count(statements))
     c4.metric("Tables extracted", len(all_tables))
 

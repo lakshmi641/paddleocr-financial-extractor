@@ -23,7 +23,7 @@
 
 ### financial_note
 
-- Source: `eval/pdfs/financial_note.pdf`
+- Source: `eval/pdfs/financial_note.pdf` (engine: `paddleocr`)
 
 **balance_sheet** (page 12) ✅ Balanced: Total Assets (7,145) = Equity (5,178) + Liabilities (1,967).
 

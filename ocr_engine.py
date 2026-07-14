@@ -71,6 +71,7 @@ class Extraction:
     from_cache: bool = False
     out_dir: str = ""
     tier: str = "fast"
+    engine: str = "paddleocr"
 
     @property
     def tables(self):
@@ -104,8 +105,13 @@ def pdf_hash(pdf_bytes):
     return hashlib.md5(pdf_bytes).hexdigest()[:8]
 
 
-def cache_dir_for(stem, digest, tier):
-    return os.path.join(OUTPUT_ROOT, f"{stem}_{tier}_{digest}")
+def cache_dir_for(stem, digest, tier, engine="paddleocr"):
+    # Keep the classic "paddleocr" engine's naming unchanged (backward
+    # compatible with existing cache dirs); other engines get their own
+    # namespace instead of a tier, since e.g. PaddleOCR-VL has no
+    # fast/accurate split to encode.
+    tag = tier if engine == "paddleocr" else engine
+    return os.path.join(OUTPUT_ROOT, f"{stem}_{tag}_{digest}")
 
 
 def _page_num(path):
@@ -290,7 +296,8 @@ def _build_pipeline(tier, device):
     return pipeline
 
 
-def extract(pdf_path, tier="fast", device=None, page_range=None, progress=None):
+def extract(pdf_path, tier="fast", device=None, page_range=None, progress=None,
+            engine="paddleocr"):
     """
     Return an Extraction for pdf_path. Uses cache when available.
 
@@ -301,9 +308,17 @@ def extract(pdf_path, tier="fast", device=None, page_range=None, progress=None):
         without callers having to know which machine they're on.
     tier: "fast" (mobile models, quick), "accurate" (server models, slower,
         sharper on small/dense digits), or "auto" -- see _extract_auto.
+        Ignored when engine="paddleocr_vl" (that pipeline has no tier split).
+    engine: "paddleocr" (PP-StructureV3, the classic two-stage detect +
+        recognize + table-structure pipeline) or "paddleocr_vl" (PaddleOCR-VL,
+        a VLM-based pipeline that reads each layout region jointly instead of
+        fitting a geometric cell grid -- see _extract_vl). VL is much heavier
+        per page, especially on CPU.
     """
     if device is None:
         device = DEFAULT_DEVICE
+    if engine == "paddleocr_vl":
+        return _extract_vl(pdf_path, device, page_range, progress)
     if tier == "auto":
         return _extract_auto(pdf_path, device, page_range, progress)
     with open(pdf_path, "rb") as f:
@@ -407,6 +422,72 @@ def _extract_auto(pdf_path, device, page_range, progress):
     return Extraction(
         pages=pages, from_cache=False, out_dir=out_dir, tier="auto",
         doc_type=fast.doc_type,
+    )
+
+
+_VL_PIPELINE_CACHE = {}
+
+
+def _build_vl_pipeline(device):
+    """PaddleOCR-VL: layout detection + a small (~0.9B param) vision-language
+    model that reads each detected region (including whole tables) directly,
+    instead of PP-StructureV3's separate table-structure-recognition step.
+    That structure model is what mis-predicts the cell grid on dense tables
+    (see table_repair.py) -- VL sidesteps that failure mode by construction,
+    at the cost of much heavier per-page inference, especially on CPU."""
+    cached = _VL_PIPELINE_CACHE.get(device)
+    if cached is not None:
+        return cached
+
+    from paddleocr import PaddleOCRVL
+
+    pipeline = PaddleOCRVL(device=device)
+    _VL_PIPELINE_CACHE[device] = pipeline
+    return pipeline
+
+
+def _extract_vl(pdf_path, device, page_range, progress):
+    """PaddleOCR-VL variant of extract(). Same cache/page-json shape as the
+    classic engine (PaddleOCR-VL's result.save_to_json also writes a
+    parsing_res_list), so load_pages_from_dir works unchanged -- it just
+    won't find a table_res_list (VL has no separate table-OCR stage), so
+    table_repair.py's word-box fallback is simply unavailable for VL tables."""
+    with open(pdf_path, "rb") as f:
+        digest = pdf_hash(f.read())
+    stem = os.path.splitext(os.path.basename(pdf_path))[0]
+    out_dir = cache_dir_for(stem, digest, "vl", engine="paddleocr_vl")
+
+    if has_cache(out_dir):
+        pages = load_pages_from_dir(out_dir)
+        doc_type = read_meta(out_dir).get("doc_type") or _guess_doc_type(pages)
+        return Extraction(
+            pages=pages, from_cache=True, out_dir=out_dir, tier="vl",
+            engine="paddleocr_vl", doc_type=doc_type,
+        )
+
+    os.makedirs(out_dir, exist_ok=True)
+    _clear_partial(out_dir)
+    doc_type = doc_type_from_pdf(pdf_path) or "Scanned"
+    pipeline = _build_vl_pipeline(device)
+
+    page_count = 0
+    try:
+        for result in pipeline.predict_iter(pdf_path):
+            page_count += 1
+            if page_range and not (page_range[0] <= page_count <= page_range[1]):
+                continue
+            result.save_to_json(os.path.join(out_dir, f"page_{page_count}.json"))
+            if progress:
+                progress(page_count, None, f"PaddleOCR-VL page {page_count}")
+    except Exception:
+        _clear_partial(out_dir)
+        raise
+
+    write_meta(out_dir, doc_type=doc_type, tier="vl", engine="paddleocr_vl")
+    pages = load_pages_from_dir(out_dir)
+    return Extraction(
+        pages=pages, from_cache=False, out_dir=out_dir, tier="vl",
+        engine="paddleocr_vl", doc_type=doc_type,
     )
 
 
