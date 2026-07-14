@@ -57,12 +57,18 @@ with st.sidebar:
         end = c2.number_input("To", min_value=1, value=5, step=1)
         page_range = (int(start), int(end))
 
-    fast_mode = st.toggle(
-        "Fast mode", value=True,
-        help="Fast = mobile OCR models (quicker). Off = server-tier models "
-             "(slower, more accurate on small/dense financial digits).",
+    tier_label = st.radio(
+        "OCR tier",
+        ["Auto (recommended)", "Fast", "Accurate"],
+        index=0,
+        help="Auto = fast mobile models on every page, then automatically "
+             "re-OCRs just the pages that contain a table -- the pages a "
+             "reconciliation actually reads numbers from -- with the "
+             "sharper server models. Fast = mobile models everywhere "
+             "(quickest). Accurate = server models everywhere (slowest, "
+             "sharpest on every page).",
     )
-    tier = "fast" if fast_mode else "accurate"
+    tier = {"Auto (recommended)": "auto", "Fast": "fast", "Accurate": "accurate"}[tier_label]
 
     st.markdown("---")
     device = os.environ.get("OCR_DEVICE", "cpu")

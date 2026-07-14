@@ -12,6 +12,7 @@ import os
 import re
 import glob
 import json
+import shutil
 import hashlib
 from dataclasses import dataclass, field
 
@@ -28,6 +29,14 @@ OUTPUT_ROOT = "output"
 # effect on GPU — PaddleOCR ignores it on CPU.
 DEFAULT_DEVICE = os.environ.get("OCR_DEVICE", "cpu")
 DEFAULT_PRECISION = os.environ.get("OCR_PRECISION")
+
+# Same env var / default paddlex itself reads (paddlex.utils.flags.PDF_RENDER_SCALE)
+# to rasterize PDF pages before OCR. _extract_auto re-renders individual pages
+# itself (see below) and must match this scale, or its "accurate" re-OCR of a
+# page runs at a different resolution than a full "accurate" pass would have
+# used -- which measurably shifts how the layout/table models segment that
+# page (verified: mismatched table counts on 4 pages before this was fixed).
+PDF_RENDER_SCALE = float(os.environ.get("PADDLE_PDX_PDF_RENDER_SCALE", "2.0"))
 
 
 # ---- data model ------------------------------------------------------------
@@ -218,6 +227,8 @@ def doc_type_from_pdf(pdf_path):
 # ---- OCR --------------------------------------------------------------------
 
 # Fast = mobile models (lighter/quicker). Accurate = server-tier + deskew.
+# "auto" isn't a pipeline config -- it's handled in _extract_auto, which
+# combines these two per page instead of picking one for the whole document.
 # NOTE: PPStructureV3's own defaults are the SERVER det/rec models, so "fast"
 # must explicitly request the mobile ones or it silently runs just as slow
 # as "accurate".
@@ -288,9 +299,13 @@ def extract(pdf_path, tier="fast", device=None, page_range=None, progress=None):
     device: "cpu", "gpu", "gpu:0", etc. Defaults to OCR_DEVICE env var (see
         DEFAULT_DEVICE) so the same call runs on CPU locally and GPU on the VM
         without callers having to know which machine they're on.
+    tier: "fast" (mobile models, quick), "accurate" (server models, slower,
+        sharper on small/dense digits), or "auto" -- see _extract_auto.
     """
     if device is None:
         device = DEFAULT_DEVICE
+    if tier == "auto":
+        return _extract_auto(pdf_path, device, page_range, progress)
     with open(pdf_path, "rb") as f:
         digest = pdf_hash(f.read())
     stem = os.path.splitext(os.path.basename(pdf_path))[0]
@@ -327,6 +342,71 @@ def extract(pdf_path, tier="fast", device=None, page_range=None, progress=None):
     return Extraction(
         pages=pages, from_cache=False, out_dir=out_dir, tier=tier,
         doc_type=doc_type,
+    )
+
+
+def _extract_auto(pdf_path, device, page_range, progress):
+    """Hybrid tier: one fixed tier for the whole document is a blunt choice --
+    "fast" blurs small digits on dense tables, "accurate" pays server-model
+    cost on cover/signature pages that never had a table to begin with. So:
+    OCR every page with "fast" first, then re-OCR (at "accurate") only the
+    pages that came back with a table block -- the pages a reconciliation
+    actually reads numbers from. Narrative pages keep their fast-tier result.
+    """
+    with open(pdf_path, "rb") as f:
+        digest = pdf_hash(f.read())
+    stem = os.path.splitext(os.path.basename(pdf_path))[0]
+    out_dir = cache_dir_for(stem, digest, "auto")
+
+    if has_cache(out_dir):
+        pages = load_pages_from_dir(out_dir)
+        doc_type = read_meta(out_dir).get("doc_type") or _guess_doc_type(pages)
+        return Extraction(
+            pages=pages, from_cache=True, out_dir=out_dir, tier="auto",
+            doc_type=doc_type,
+        )
+
+    fast = extract(pdf_path, tier="fast", device=device, page_range=page_range,
+                    progress=progress)
+
+    os.makedirs(out_dir, exist_ok=True)
+    _clear_partial(out_dir)
+    for path in glob.glob(os.path.join(fast.out_dir, "page_*.json")):
+        shutil.copy(path, os.path.join(out_dir, os.path.basename(path)))
+
+    upgrade_pages = sorted(
+        pg.page_no for pg in fast.pages if any(b.label == "table" for b in pg.blocks)
+    )
+
+    if upgrade_pages:
+        import pypdfium2 as pdfium
+
+        # Use the same rasterizer (and scale) paddlex's own PDF reader uses,
+        # not PyMuPDF/fitz: a different renderer produces different
+        # anti-aliasing at the pixel level even at matched nominal DPI, which
+        # measurably changes recognition on borderline characters (verified:
+        # it flipped one word's OCR, silently breaking a keyword match in
+        # reconcile.py). pdfium's render() already returns BGR, so no channel
+        # swap is needed (unlike fitz, which renders RGB).
+        pdf_doc = pdfium.PdfDocument(pdf_path)
+        pipeline = _build_pipeline("accurate", device)
+        for i, page_no in enumerate(upgrade_pages, 1):
+            if progress:
+                progress(
+                    len(fast.pages) + i, None,
+                    f"Upgrading table page {page_no} ({i}/{len(upgrade_pages)})",
+                )
+            img = pdf_doc[page_no - 1].render(scale=PDF_RENDER_SCALE).to_numpy()
+            result = next(iter(pipeline.predict(img)))
+            result.save_to_json(os.path.join(out_dir, f"page_{page_no}.json"))
+
+    write_meta(
+        out_dir, doc_type=fast.doc_type, tier="auto", upgraded_pages=upgrade_pages,
+    )
+    pages = load_pages_from_dir(out_dir)
+    return Extraction(
+        pages=pages, from_cache=False, out_dir=out_dir, tier="auto",
+        doc_type=fast.doc_type,
     )
 
 

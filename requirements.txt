@@ -31,6 +31,7 @@ beautifulsoup4
 tqdm
 
 PyMuPDF
+pypdfium2  # ocr_engine.py's "auto" tier re-renders individual pages with this directly (same rasterizer paddlex uses internally)
 
 # Streamlit UI (app.py)
 streamlit>=1.36
