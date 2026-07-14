@@ -1,7 +1,19 @@
-# Apple Silicon (M1/M2/M3/M4)
-
-paddlepaddle>=3.0.0
+# paddlepaddle is intentionally NOT listed here: the CPU vs GPU build is
+# machine-specific, and `pip install -r requirements.txt` would silently
+# reinstall the CPU wheel over a working GPU one. Install it separately:
+#
+#   CPU (Apple Silicon / dev machine):
+#     pip install paddlepaddle>=3.0.0
+#
+#   GPU (T4 VM, after the NVIDIA driver + CUDA toolkit are installed —
+#   check the CUDA version with `nvidia-smi` and match the index below,
+#   see https://www.paddlepaddle.org.cn/en/install/quick):
+#     pip install paddlepaddle-gpu==3.3.1 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+#
+# Then set OCR_DEVICE=gpu:0 (and optionally OCR_PRECISION=fp16) as an env
+# var for the process running app.py / extract.py — see ocr_engine.py.
 paddleocr>=3.0.0
+paddlex[ocr]>=3.0.0  # PP-StructureV3 requires the [ocr] extras; without it, pipeline creation raises DependencyError
 
 pandas>=2.2.0
 numpy>=1.26.0

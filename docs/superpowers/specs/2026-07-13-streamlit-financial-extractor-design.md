@@ -74,3 +74,5 @@ please review" (never a false green check).
 ## Out of scope
 Multi-engine cross-check, GPU/VM serving (kept swappable via `ocr_engine`), training,
 non-financial doc types.
+
+

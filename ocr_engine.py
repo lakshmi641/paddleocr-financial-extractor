@@ -15,7 +15,19 @@ import json
 import hashlib
 from dataclasses import dataclass, field
 
+# oneDNN's PIR executor raises NotImplementedError on some layout/table models
+# with this paddlepaddle build (ConvertPirAttribute2RuntimeAttribute on
+# ArrayAttribute<DoubleAttribute>). Must be set before paddlex is imported.
+os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "0")
+
 OUTPUT_ROOT = "output"
+
+# Overridable so the same code runs unchanged on a CPU dev machine and the
+# GPU (T4) VM: set OCR_DEVICE=gpu:0 there. OCR_PRECISION=fp16 is the usual
+# pairing for a T4 (halves VRAM, minimal accuracy loss) but only takes
+# effect on GPU — PaddleOCR ignores it on CPU.
+DEFAULT_DEVICE = os.environ.get("OCR_DEVICE", "cpu")
+DEFAULT_PRECISION = os.environ.get("OCR_PRECISION")
 
 
 # ---- data model ------------------------------------------------------------
@@ -117,7 +129,22 @@ def load_pages_from_dir(out_dir):
 
 
 def has_cache(out_dir):
-    return bool(glob.glob(os.path.join(out_dir, "page_*.json")))
+    """A cache is only valid if meta.json exists: it's written exclusively
+    after a full extract() loop completes, so its presence rules out a
+    partial cache left behind by a crashed/interrupted run."""
+    return os.path.exists(_meta_path(out_dir)) and bool(
+        glob.glob(os.path.join(out_dir, "page_*.json"))
+    )
+
+
+def _clear_partial(out_dir):
+    """Remove any page_*.json/meta.json left behind by a prior run that
+    never finished, so a crash can't leave a stale partial cache on disk."""
+    for path in glob.glob(os.path.join(out_dir, "page_*.json")):
+        os.remove(path)
+    meta_path = _meta_path(out_dir)
+    if os.path.exists(meta_path):
+        os.remove(meta_path)
 
 
 def _meta_path(out_dir):
@@ -154,9 +181,15 @@ def doc_type_from_pdf(pdf_path):
 
 # ---- OCR --------------------------------------------------------------------
 
-# Fast = mobile models (default weights). Accurate = server-tier + deskew.
+# Fast = mobile models (lighter/quicker). Accurate = server-tier + deskew.
+# NOTE: PPStructureV3's own defaults are the SERVER det/rec models, so "fast"
+# must explicitly request the mobile ones or it silently runs just as slow
+# as "accurate".
 TIER_KWARGS = {
-    "fast": {},
+    "fast": {
+        "text_detection_model_name": "PP-OCRv5_mobile_det",
+        "text_recognition_model_name": "PP-OCRv5_mobile_rec",
+    },
     "accurate": {
         "text_detection_model_name": "PP-OCRv5_server_det",
         "text_recognition_model_name": "PP-OCRv5_server_rec",
@@ -169,7 +202,18 @@ TIER_KWARGS = {
 }
 
 
+_PIPELINE_CACHE = {}
+
+
 def _build_pipeline(tier, device):
+    """Building a PPStructureV3 pipeline loads ~13 CPU models and is by far
+    the most expensive part of extraction (minutes, vs. seconds/page once
+    warm) — so keep one pipeline per (tier, device) alive for the life of
+    the process instead of rebuilding it on every extract() call."""
+    cached = _PIPELINE_CACHE.get((tier, device))
+    if cached is not None:
+        return cached
+
     import inspect
     from paddleocr import PPStructureV3
 
@@ -182,6 +226,8 @@ def _build_pipeline(tier, device):
     candidate.update(TIER_KWARGS.get(tier, {}))
     if device == "cpu":
         candidate["cpu_threads"] = int(os.environ.get("OCR_CPU_THREADS", "8"))
+    else:
+        candidate["precision"] = DEFAULT_PRECISION
 
     sig = inspect.signature(PPStructureV3.__init__).parameters
     has_var_kwargs = any(
@@ -192,16 +238,23 @@ def _build_pipeline(tier, device):
         for k, v in candidate.items()
         if v is not None and (has_var_kwargs or k in sig)
     }
-    return PPStructureV3(**kwargs)
+    pipeline = PPStructureV3(**kwargs)
+    _PIPELINE_CACHE[(tier, device)] = pipeline
+    return pipeline
 
 
-def extract(pdf_path, tier="fast", device="cpu", page_range=None, progress=None):
+def extract(pdf_path, tier="fast", device=None, page_range=None, progress=None):
     """
     Return an Extraction for pdf_path. Uses cache when available.
 
     progress: optional callable(done, total, msg) for UI progress bars.
     page_range: optional (start, end) 1-indexed inclusive; None = whole doc.
+    device: "cpu", "gpu", "gpu:0", etc. Defaults to OCR_DEVICE env var (see
+        DEFAULT_DEVICE) so the same call runs on CPU locally and GPU on the VM
+        without callers having to know which machine they're on.
     """
+    if device is None:
+        device = DEFAULT_DEVICE
     with open(pdf_path, "rb") as f:
         digest = pdf_hash(f.read())
     stem = os.path.splitext(os.path.basename(pdf_path))[0]
@@ -216,17 +269,22 @@ def extract(pdf_path, tier="fast", device="cpu", page_range=None, progress=None)
         )
 
     os.makedirs(out_dir, exist_ok=True)
+    _clear_partial(out_dir)  # drop any leftovers from a previously crashed run
     doc_type = doc_type_from_pdf(pdf_path) or "Scanned"
     pipeline = _build_pipeline(tier, device)
 
     page_count = 0
-    for result in pipeline.predict_iter(pdf_path):
-        page_count += 1
-        if page_range and not (page_range[0] <= page_count <= page_range[1]):
-            continue
-        result.save_to_json(os.path.join(out_dir, f"page_{page_count}.json"))
-        if progress:
-            progress(page_count, None, f"OCR page {page_count}")
+    try:
+        for result in pipeline.predict_iter(pdf_path):
+            page_count += 1
+            if page_range and not (page_range[0] <= page_count <= page_range[1]):
+                continue
+            result.save_to_json(os.path.join(out_dir, f"page_{page_count}.json"))
+            if progress:
+                progress(page_count, None, f"OCR page {page_count}")
+    except Exception:
+        _clear_partial(out_dir)
+        raise
 
     write_meta(out_dir, doc_type=doc_type, tier=tier)
     pages = load_pages_from_dir(out_dir)

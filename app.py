@@ -65,11 +65,18 @@ with st.sidebar:
     tier = "fast" if fast_mode else "accurate"
 
     st.markdown("---")
-    st.caption(
-        "⏱ Scanned docs run OCR locally on CPU. The whole document can take "
-        "several minutes on first run (models download once, then cached). "
-        "Re-uploading the same PDF loads instantly from cache."
-    )
+    device = os.environ.get("OCR_DEVICE", "cpu")
+    if device == "cpu":
+        st.caption(
+            "⏱ Scanned docs run OCR locally on CPU. The whole document can take "
+            "several minutes on first run (models download once, then cached). "
+            "Re-uploading the same PDF loads instantly from cache."
+        )
+    else:
+        st.caption(
+            f"⚡ Scanned docs run OCR on GPU ({device}). Models download once, "
+            "then cached. Re-uploading the same PDF loads instantly from cache."
+        )
 
 
 # ---- header ----------------------------------------------------------------
@@ -126,7 +133,7 @@ def run_extraction(pdf_path):
         prog.progress(min(done / 60.0, 0.95), text=f"{msg}…")
 
     extraction = ocr_engine.extract(
-        pdf_path, tier=tier, device="cpu",
+        pdf_path, tier=tier, device=device,
         page_range=page_range, progress=cb,
     )
     prog.progress(1.0, text="Done")
