@@ -151,6 +151,41 @@ def check_balance_sheet(statement):
     )
 
 
+# ---- Profit & Loss ----------------------------------------------------------
+# Identity: Total Income - Total Expenses == Profit before tax (latest year).
+# (Deliberately not Profit before tax - Tax expense == Profit for the period:
+# the tax-expense rows are usually 2-3 sub-lines with a much higher OCR error
+# rate than a single "Total Income"/"Total expenses"/"Profit before tax" row.)
+
+def check_profit_loss(statement):
+    df = _first_df(statement)
+    if df is None:
+        return ReconResult()
+
+    income = _first(_find_row_numbers(df, ["totalincome"]))
+    expenses = _first(_find_row_numbers(df, ["totalexpenses"]))
+    pbt = _first(_find_row_numbers(df, ["profitbeforetax"]))
+
+    if income is None or expenses is None or pbt is None:
+        return ReconResult(
+            COULD_NOT_VERIFY,
+            "Could not verify (Total Income / Total Expenses / Profit "
+            "before tax not found or parsed). Please review.",
+        )
+
+    if abs((income - expenses) - pbt) <= _tol(pbt, income - expenses):
+        return ReconResult(
+            OK,
+            f"Ties out: Total Income ({income:,.0f}) - Total Expenses "
+            f"({expenses:,.0f}) = Profit before tax ({pbt:,.0f}).",
+        )
+    return ReconResult(
+        COULD_NOT_VERIFY,
+        f"Mismatch: Income - Expenses ({income - expenses:,.0f}) != "
+        f"Profit before tax ({pbt:,.0f}). Please review.",
+    )
+
+
 # ---- Cash Flow -------------------------------------------------------------
 # Identity: opening + net change == closing (latest year).
 
@@ -190,7 +225,4 @@ def check(statement):
         return check_balance_sheet(statement)
     if statement.key == "cash_flow":
         return check_cash_flow(statement)
-    return ReconResult(
-        COULD_NOT_VERIFY,
-        "No automatic identity check for P&L — review totals manually.",
-    )
+    return check_profit_loss(statement)

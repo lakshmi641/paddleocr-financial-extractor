@@ -12,15 +12,20 @@ import json
 
 import pandas as pd
 
+import table_repair
 from classify import html_to_df
+
+
+def _table_df(html, table_words):
+    return table_repair.table_df(html, table_words, html_to_df)
 
 
 def build_excel(extraction):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         wrote_any = False
-        for page_no, order, html in extraction.tables:
-            df = html_to_df(html)
+        for page_no, order, html, table_words in extraction.tables:
+            df = _table_df(html, table_words)
             if df is None:
                 continue
             sheet = f"P{page_no}_{order}"[:31]
@@ -42,8 +47,8 @@ def build_json(extraction, statements=None):
         "full_text": extraction.full_text,
         "tables": [],
     }
-    for page_no, order, html in extraction.tables:
-        df = html_to_df(html)
+    for page_no, order, html, table_words in extraction.tables:
+        df = _table_df(html, table_words)
         data["tables"].append(
             {
                 "page": page_no,
@@ -72,7 +77,7 @@ def build_markdown(extraction):
         lines.append(f"\n<!-- Page {pg.page_no} -->\n")
         for b in pg.blocks:
             if b.label == "table" and b.content:
-                df = html_to_df(b.content)
+                df = _table_df(b.content, b.table_words)
                 if df is not None:
                     lines.append(df.to_markdown(index=False) + "\n")
                 continue

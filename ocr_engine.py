@@ -38,6 +38,13 @@ class Block:
     content: str
     page: int
     order: int
+    # For table blocks only: raw OCR words (text + bbox) underneath the
+    # table, straight from PPStructureV3's table_ocr_pred. The table
+    # *structure* model occasionally mis-predicts the cell grid on dense
+    # tables (merges dozens of rows into one giant cell) even though the
+    # underlying word-level OCR is fine; table_repair.py uses these to
+    # rebuild a sane grid when that happens. None for non-table blocks.
+    table_words: list = None
 
 
 @dataclass
@@ -58,12 +65,14 @@ class Extraction:
 
     @property
     def tables(self):
-        """Flat list of (page_no, order, html) for every table block."""
+        """Flat list of (page_no, order, html, table_words) for every table
+        block. table_words is the raw OCR word/box list backing that table
+        (see Block.table_words), or None if unavailable."""
         out = []
         for pg in self.pages:
             for b in pg.blocks:
                 if b.label == "table" and b.content:
-                    out.append((pg.page_no, b.order, b.content))
+                    out.append((pg.page_no, b.order, b.content, b.table_words))
         return out
 
     @property
@@ -95,6 +104,24 @@ def _page_num(path):
     return int(m.group(1)) if m else 0
 
 
+def _table_words_list(page_json):
+    """Extract (text, box) pairs per table from PPStructureV3's table_res_list,
+    in the same left-to-right/top-to-bottom order the tables themselves appear
+    on the page. Returns a list (one entry per table on the page) of word-lists."""
+    out = []
+    for tbl in page_json.get("table_res_list", []) or []:
+        pred = tbl.get("table_ocr_pred") or {}
+        texts = pred.get("rec_texts") or []
+        boxes = pred.get("rec_boxes") or []
+        words = [
+            (str(t), tuple(b))
+            for t, b in zip(texts, boxes)
+            if not str(t).strip().startswith("<div")  # embedded image placeholder
+        ]
+        out.append(words)
+    return out
+
+
 def load_pages_from_dir(out_dir):
     """Load page_*.json (PPStructureV3 save_to_json format) into Page objects."""
     paths = sorted(glob.glob(os.path.join(out_dir, "page_*.json")), key=_page_num)
@@ -102,11 +129,19 @@ def load_pages_from_dir(out_dir):
     for path in paths:
         with open(path, "r", encoding="utf8") as f:
             d = json.load(f)
+        table_words = _table_words_list(d)
+        table_i = 0
         blocks = []
         for b in d.get("parsing_res_list", []):
+            label = b.get("block_label", "")
+            words = None
+            if label == "table":
+                if table_i < len(table_words):
+                    words = table_words[table_i]
+                table_i += 1
             blocks.append(
                 Block(
-                    label=b.get("block_label", ""),
+                    label=label,
                     content=b.get("block_content", ""),
                     page=_page_num(path),
                     order=(
@@ -114,6 +149,7 @@ def load_pages_from_dir(out_dir):
                         if b.get("block_order") is not None
                         else b.get("block_id", 0)
                     ),
+                    table_words=words,
                 )
             )
         blocks.sort(key=lambda x: x.order if x.order is not None else 10_000)

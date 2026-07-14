@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+import table_repair
+
 STATEMENTS = ["balance_sheet", "profit_loss", "cash_flow"]
 
 STATEMENT_LABELS = {
@@ -112,7 +114,10 @@ def classify(extraction):
         scores = {k: _score(text, k) for k in STATEMENTS}
         page_scores[pg.page_no] = scores
         tables_here = [
-            TableRef(pg.page_no, b.order, b.content, html_to_df(b.content))
+            TableRef(
+                pg.page_no, b.order, b.content,
+                table_repair.table_df(b.content, b.table_words, html_to_df),
+            )
             for b in pg.blocks
             if b.label == "table" and b.content
         ]

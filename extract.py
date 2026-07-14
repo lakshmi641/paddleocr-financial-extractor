@@ -240,7 +240,7 @@ if markdown_pages:
         encoding="utf8"
     ) as f:
 
-        f.write(markdown)
+        f.write(markdown["markdown_texts"])
 
 print()
 print("=" * 70)
