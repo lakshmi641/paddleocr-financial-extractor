@@ -103,10 +103,13 @@ def _first_df(statement):
 # ---- Balance Sheet ---------------------------------------------------------
 # Identity: Total Assets == Total Equity + Total Liabilities (latest year).
 
-def check_balance_sheet(statement):
-    df = _first_df(statement)
+def extract_balance_sheet_figures(df):
+    """Best-effort latest-year figures: {total_assets, total_liabilities,
+    total_equity}. Any value is None if it couldn't be found/parsed. Exposed
+    separately from check_balance_sheet so callers (e.g. the eval harness)
+    can compare the raw numbers against ground truth, not just pass/fail."""
     if df is None:
-        return ReconResult()
+        return {"total_assets": None, "total_liabilities": None, "total_equity": None}
 
     assets = _first(_find_row_numbers(df, ["totalassets"]))
     liabilities = _first(
@@ -119,7 +122,7 @@ def check_balance_sheet(statement):
     # Equity total: largest equity-labelled value that isn't a liabilities/
     # share-capital sub-line and isn't larger than total assets.
     equity = None
-    if df is not None and assets:
+    if assets:
         best = 0.0
         for _, row in df.iterrows():
             cells = [str(c) for c in row.tolist()]
@@ -133,6 +136,19 @@ def check_balance_sheet(statement):
                     if 0 < n <= assets + _tol(assets, assets) and n > best:
                         best = n
         equity = best or None
+
+    return {"total_assets": assets, "total_liabilities": liabilities, "total_equity": equity}
+
+
+def check_balance_sheet(statement):
+    df = _first_df(statement)
+    if df is None:
+        return ReconResult()
+
+    figs = extract_balance_sheet_figures(df)
+    assets = figs["total_assets"]
+    liabilities = figs["total_liabilities"]
+    equity = figs["total_equity"]
 
     if assets is None or liabilities is None or equity is None:
         return ReconResult()
@@ -157,14 +173,27 @@ def check_balance_sheet(statement):
 # the tax-expense rows are usually 2-3 sub-lines with a much higher OCR error
 # rate than a single "Total Income"/"Total expenses"/"Profit before tax" row.)
 
+def extract_profit_loss_figures(df):
+    """Best-effort latest-year figures: {total_income, total_expenses,
+    profit_before_tax}. Any value is None if it couldn't be found/parsed."""
+    if df is None:
+        return {"total_income": None, "total_expenses": None, "profit_before_tax": None}
+    return {
+        "total_income": _first(_find_row_numbers(df, ["totalincome"])),
+        "total_expenses": _first(_find_row_numbers(df, ["totalexpenses"])),
+        "profit_before_tax": _first(_find_row_numbers(df, ["profitbeforetax"])),
+    }
+
+
 def check_profit_loss(statement):
     df = _first_df(statement)
     if df is None:
         return ReconResult()
 
-    income = _first(_find_row_numbers(df, ["totalincome"]))
-    expenses = _first(_find_row_numbers(df, ["totalexpenses"]))
-    pbt = _first(_find_row_numbers(df, ["profitbeforetax"]))
+    figs = extract_profit_loss_figures(df)
+    income = figs["total_income"]
+    expenses = figs["total_expenses"]
+    pbt = figs["profit_before_tax"]
 
     if income is None or expenses is None or pbt is None:
         return ReconResult(
@@ -189,19 +218,33 @@ def check_profit_loss(statement):
 # ---- Cash Flow -------------------------------------------------------------
 # Identity: opening + net change == closing (latest year).
 
+def extract_cash_flow_figures(df):
+    """Best-effort latest-year figures: {opening, closing, net_change}. Any
+    value is None if it couldn't be found/parsed."""
+    if df is None:
+        return {"opening": None, "closing": None, "net_change": None}
+    return {
+        "opening": _first(_find_row_numbers(df, ["atthebeginningof"])),
+        "closing": _first(_find_row_numbers(df, ["attheendof", "attheyearend"])),
+        "net_change": _first(
+            _find_row_numbers(
+                df, ["netincrease", "netdecrease", "net(decrease)",
+                     "net(increase)", "netchangeincash"],
+            )
+        ),
+    }
+
+
 def check_cash_flow(statement):
     df = _first_df(statement)
     if df is None:
         return ReconResult()
 
-    opening = _first(_find_row_numbers(df, ["atthebeginningof"]))
-    closing = _first(_find_row_numbers(df, ["attheendof", "attheyearend"]))
-    net = _first(
-        _find_row_numbers(
-            df, ["netincrease", "netdecrease", "net(decrease)", "net(increase)",
-                 "netchangeincash"],
-        )
-    )
+    figs = extract_cash_flow_figures(df)
+    opening = figs["opening"]
+    closing = figs["closing"]
+    net = figs["net_change"]
+
     if opening is None or closing is None or net is None:
         return ReconResult()
 
@@ -226,3 +269,20 @@ def check(statement):
     if statement.key == "cash_flow":
         return check_cash_flow(statement)
     return check_profit_loss(statement)
+
+
+_FIGURE_EXTRACTORS = {
+    "balance_sheet": extract_balance_sheet_figures,
+    "profit_loss": extract_profit_loss_figures,
+    "cash_flow": extract_cash_flow_figures,
+}
+
+
+def extract_figures(statement):
+    """Best-effort latest-year figures for any statement, keyed the same way
+    regardless of statement type. Used by the eval harness to score field-
+    level accuracy against ground truth (check() only reports pass/fail)."""
+    extractor = _FIGURE_EXTRACTORS.get(statement.key)
+    if extractor is None or statement.page_no is None:
+        return {}
+    return extractor(_first_df(statement))

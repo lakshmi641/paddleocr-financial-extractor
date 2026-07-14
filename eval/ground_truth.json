@@ -1,0 +1,32 @@
+{
+  "_readme": [
+    "One entry per real financial statement PDF you want to score.",
+    "Fill in only the fields you can verify by reading the PDF yourself -- ",
+    "leave a field out (don't guess a 0) if you don't have a trustworthy value for it.",
+    "'pdf' should point at the file under eval/pdfs/. 'tier' is 'fast' or 'accurate'.",
+    "All figures are the LATEST year column, matching what reconcile.py checks.",
+    "Run:  python eval_harness.py"
+  ],
+
+  "financial_note": {
+    "pdf": "eval/pdfs/financial_note.pdf",
+    "cache_dir": "output/financial_note_accurate_9e6062f1",
+    "tier": "accurate",
+    "balance_sheet": {
+      "total_assets": 7145,
+      "total_liabilities": 1967,
+      "total_equity": 5178
+    },
+    "profit_loss": {
+      "total_income": 3548,
+      "total_expenses": 2924,
+      "profit_before_tax": 624
+    },
+    "cash_flow": {
+      "opening": 396,
+      "closing": 89,
+      "net_change": -307
+    }
+  }
+
+}
